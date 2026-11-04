@@ -221,7 +221,9 @@ fn config() -> Json<Value> {
     );
     feature_states.insert("pm-19148-innovation-archive".to_owned(), true);
     // bh: "Share via link" on vault items (Item Sends). Always on: this fork exists for it.
+    // Item Sends are created and opened only through the SDK, so the SDK Send code must be on too.
     feature_states.insert("pm-34203-temporary-item-sharing".to_owned(), true);
+    feature_states.insert("pm-30110-sdk-sends-api".to_owned(), true);
 
     Json(json!({
         // Note: The clients use this version to handle backwards compatibility concerns

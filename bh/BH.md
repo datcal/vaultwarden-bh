@@ -11,6 +11,12 @@ Send's key, and that key lives only in the link's `#` fragment, so the server ne
 Upstream Vaultwarden does not support it yet (no Item type, the flag isn't served). This fork adds
 both. The official browser extension and web vault are used unchanged.
 
+Item Sends are created and opened **only through Bitwarden's SDK**: with the older TypeScript Send
+code the recipient page fails ("Item type Sends require the SDK to decrypt") and the owner's list
+hides them. So the fork also serves `pm-30110-sdk-sends-api`, which moves *all* Sends (text and file
+too) in the web vault, browser extension and desktop app to the SDK. That was tested end to end
+against this fork in November 2026 (see *Testing*).
+
 **No email verification, on purpose.** Bitwarden makes the recipient prove their email with a one-time
 code. The owner of this fork asked for a plain link: whoever has the link can open it, like a text
 Send. The clients still require at least one email address in the form; here it is only a label in
@@ -35,8 +41,8 @@ Keep it this small. Every change is marked with a `bh` comment.
 | `src/db/models/send.rs` | `SendType::Item = 2`; `BH_ITEM_EMAILS_KEY`; `to_json` returns `data` for Item Sends, `emails`, and `authType` Email when emails are stored; `to_json_access` returns `data` and never the emails. |
 | `src/db/models/mod.rs` | Re-exports `BH_ITEM_EMAILS_KEY`. |
 | `src/api/core/sends.rs` | `SendData.data`; `bh_item_send_data` (needs `metadata`, stores the emails label); Item branch in `create_send` and `update_send_from_data`; `emails` refused only for non-Item Sends; `post_access` counts Item opens (one-time links close); `bh_tests`. |
-| `src/api/core/mod.rs` | `/api/config` serves `pm-34203-temporary-item-sharing: true`. |
-| `src/config.rs` | The flag is in `SUPPORTED_FEATURE_FLAGS`. |
+| `src/api/core/mod.rs` | `/api/config` serves `pm-34203-temporary-item-sharing` and `pm-30110-sdk-sends-api` as `true`. |
+| `src/config.rs` | Both flags are in `SUPPORTED_FEATURE_FLAGS`. |
 | `.github/workflows/*` | Upstream's workflows are deleted: this repository has none of their secrets, and they must not run here. Only `bh-*.yml` stays. |
 | `bh/`, `.github/workflows/bh-*.yml` | Ours. |
 
@@ -96,8 +102,14 @@ A scheduled agent runs this. A person can too.
    - `bitwarden/server` `main`: `src/Api/Tools/Models/Request/SendRequestModel.cs`,
      `Response/SendResponseModel.cs`, `Response/SendAccessResponseModel.cs`, `SendDataModel.cs`,
      `SendItemMetadataModel.cs`.
-   - `bitwarden/clients`, newest `browser-v*` tag: `libs/tools/share/` and the flag in
-     `libs/common/src/enums/feature-flag.enum.ts`.
+   - `bitwarden/clients`, newest `browser-v*` tag: `libs/tools/share/`, both flags in
+     `libs/common/src/enums/feature-flag.enum.ts`, and `libs/common/src/tools/send/services/`
+     (which code path needs which flag).
+   - `bitwarden/sdk-internal` `main`: the Send endpoints in
+     `crates/bitwarden-api-api/src/apis/sends_api.rs`. Every path the SDK calls must exist in
+     `src/api/core/sends.rs` (today: `/sends`, `/sends/{id}`, `/sends/file/v2`,
+     `/sends/{id}/file/{fileId}`, `/sends/{id}/remove-password`, `/sends/access`,
+     `/sends/access/file/{fileId}`).
 
    If a field, the flag name or the access flow changed, fix it (in the open sync pull request, or a
    new `fix/client-YYYY-MM-DD` pull request into `bh`) and update this section. If nothing changed,
@@ -105,6 +117,20 @@ A scheduled agent runs this. A person can too.
    breaks; note it.
 
 Never add a domain name, address, token or anything about the owner's servers to this repository.
+
+## Testing
+
+Unit tests: `cargo test --features sqlite bh_tests`.
+
+End to end (done for the first release, 2026-11-04): run the image locally with HTTPS (the web vault
+refuses plain HTTP), `SIGNUPS_ALLOWED=true`, `CLIENT_SUPPRESS_ONBOARDING=true`, and drive the bundled
+web vault with Playwright:
+- owner: sign up, add a login, ⋮ → Share via link, email, *One time share*, Copy link →
+  `POST /api/sends` 200;
+- recipient (fresh browser, no account): the link shows name, username, password, website;
+  the email label is not on the page; the second open says the Send no longer exists;
+- normal Sends with the SDK flag: text Send created and opened, file Send uploaded
+  (`/sends/file/v2` + upload) and downloaded intact, the Send list decrypts, delete works.
 
 ## CI: `.github/workflows/bh-build.yml`
 
