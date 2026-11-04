@@ -55,12 +55,18 @@ pub struct Send {
 pub enum SendType {
     Text = 0,
     File = 1,
+    // bh: a vault item shared through "Share via link" (Bitwarden's temporary item sharing).
+    Item = 2,
 }
 
+/// bh: key inside an Item Send's stored `data` JSON that holds the comma-separated recipient
+/// emails. They are only a label for the owner; nothing verifies them (see `bh/BH.md`).
+pub const BH_ITEM_EMAILS_KEY: &str = "bhEmails";
+
 enum SendAuthType {
-    #[allow(dead_code)]
     // Send requires email OTP verification
-    Email = 0, // Not yet supported by Vaultwarden
+    // bh: reported for Item Sends that carry emails; the OTP itself is not enforced.
+    Email = 0,
     // Send requires a password
     Password = 1,
     // Send requires no auth
@@ -152,6 +158,16 @@ impl Send {
             data["size"] = Value::String(size.to_string());
         }
 
+        // bh: Item Sends keep their recipient emails inside the stored data; hand them out separately.
+        let emails = data.as_object_mut().and_then(|o| o.remove(BH_ITEM_EMAILS_KEY)).filter(Value::is_string);
+        let auth_type = if self.password_hash.is_some() {
+            SendAuthType::Password
+        } else if emails.is_some() {
+            SendAuthType::Email
+        } else {
+            SendAuthType::None
+        };
+
         json!({
             "id": self.uuid,
             "accessId": self.access_id(),
@@ -161,12 +177,14 @@ impl Send {
             "notes": self.notes,
             "text": if self.atype == SendType::Text as i32 { Some(&data) } else { None },
             "file": if self.atype == SendType::File as i32 { Some(&data) } else { None },
+            "data": if self.atype == SendType::Item as i32 { Some(&data) } else { None }, // bh
 
             "key": self.akey,
             "maxAccessCount": self.max_access_count,
             "accessCount": self.access_count,
             "password": self.password_hash.as_deref().map(|h| BASE64URL_NOPAD.encode(h)),
-            "authType": if self.password_hash.is_some() { SendAuthType::Password as i32 } else { SendAuthType::None as i32 },
+            "emails": emails, // bh
+            "authType": auth_type as i32, // bh: was Password or None only
             "disabled": self.disabled,
             "hideEmail": self.hide_email.unwrap_or(false),
 
@@ -185,6 +203,11 @@ impl Send {
             data["size"] = Value::String(size.to_string());
         }
 
+        // bh: the recipient never sees the owner's email label.
+        if let Some(o) = data.as_object_mut() {
+            o.remove(BH_ITEM_EMAILS_KEY);
+        }
+
         json!({
             "id": self.access_id(),
             "type": self.atype,
@@ -192,6 +215,7 @@ impl Send {
             "name": self.name,
             "text": if self.atype == SendType::Text as i32 { Some(&data) } else { None },
             "file": if self.atype == SendType::File as i32 { Some(&data) } else { None },
+            "data": if self.atype == SendType::Item as i32 { Some(&data) } else { None }, // bh
 
             "expirationDate": self.expiration_date.as_ref().map(format_date),
             "creatorIdentifier": self.creator_identifier(conn).await,

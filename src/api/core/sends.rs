@@ -16,7 +16,7 @@ use crate::{
     config::PathType,
     db::{
         DbConn, DbPool,
-        models::{Device, OrgPolicy, OrgPolicyType, Send, SendFileId, SendId, SendType, UserId},
+        models::{BH_ITEM_EMAILS_KEY, Device, OrgPolicy, OrgPolicyType, Send, SendFileId, SendId, SendType, UserId},
     },
     util::{NumberOrString, save_temp_file},
 };
@@ -84,6 +84,7 @@ pub struct SendData {
     notes: Option<String>,
     text: Option<Value>,
     file: Option<Value>,
+    data: Option<Value>, // bh: Item Sends (encrypted item + plain metadata)
     file_length: Option<NumberOrString>,
 
     // Used for key rotations
@@ -126,11 +127,35 @@ async fn enforce_disable_hide_email_policy(data: &SendData, headers: &Headers, c
     Ok(())
 }
 
+/// bh: the stored `data` of an Item Send: the client's `data` object (encrypted item, plain
+/// metadata) with the recipient emails added under `BH_ITEM_EMAILS_KEY`. The emails are only a
+/// label: the link opens for anyone who has it, as the owner asked (see `bh/BH.md`).
+fn bh_item_send_data(data: Option<Value>, emails: Option<&str>) -> ApiResult<Value> {
+    let Some(mut d) = data else {
+        err!("Send data not provided");
+    };
+    let Some(o) = d.as_object_mut() else {
+        err!("Send data must be an object");
+    };
+    if !o.get("metadata").is_some_and(Value::is_object) {
+        err!("Metadata is required for item sends");
+    }
+    o.remove("response");
+    o.remove(BH_ITEM_EMAILS_KEY);
+    let emails: Vec<&str> = emails.unwrap_or_default().split(',').map(str::trim).filter(|e| !e.is_empty()).collect();
+    if !emails.is_empty() {
+        o.insert(BH_ITEM_EMAILS_KEY.to_owned(), Value::String(emails.join(",")));
+    }
+    Ok(d)
+}
+
 fn create_send(data: SendData, user_id: UserId) -> ApiResult<Send> {
     let data_val = if data.r#type == SendType::Text as i32 {
         data.text
     } else if data.r#type == SendType::File as i32 {
         data.file
+    } else if data.r#type == SendType::Item as i32 {
+        Some(bh_item_send_data(data.data, data.emails.as_deref())?) // bh
     } else {
         err!("Invalid Send type")
     };
@@ -148,7 +173,8 @@ fn create_send(data: SendData, user_id: UserId) -> ApiResult<Send> {
         );
     }
 
-    if data.emails.is_some() {
+    // bh: Item Sends keep their emails as a label (bh_item_send_data); other types still refuse them
+    if data.emails.is_some() && data.r#type != SendType::Item as i32 {
         err!("Sends with email verification is not supported");
     }
 
@@ -373,7 +399,8 @@ async fn post_access(headers: SendHeaders, conn: DbConn, nt: Notify<'_>) -> Json
         err_code!(SEND_INACCESSIBLE_MSG, 404)
     }
     // Files are incremented during the download
-    if send.atype == SendType::Text as i32 && !send.register_access(&conn).await? {
+    // bh: Item Sends count here too, so a one-time share link closes after it is opened
+    if send.atype != SendType::File as i32 && !send.register_access(&conn).await? {
         err_code!(SEND_INACCESSIBLE_MSG, 404)
     }
     process_access(send, conn, nt).await
@@ -474,7 +501,8 @@ async fn put_send(send_id: SendId, data: Json<SendData>, headers: Headers, conn:
         err!("Send not found", "Send send_id is invalid or does not belong to user")
     };
 
-    if data.emails.is_some() {
+    // bh: Item Sends keep their emails as a label; other types still refuse them
+    if data.emails.is_some() && data.r#type != SendType::Item as i32 {
         err!("Sends with email verification is not supported");
     }
 
@@ -515,6 +543,9 @@ async fn update_send_from_data(
             err!("Send data not provided");
         };
         send.data = data_str;
+    } else if data.r#type == SendType::Item as i32 {
+        // bh: Item Sends are re-encrypted on key rotation and edited from the Send list
+        send.data = serde_json::to_string(&bh_item_send_data(data.data, data.emails.as_deref())?)?;
     }
 
     send.name = data.name;
@@ -580,4 +611,71 @@ async fn put_remove_password(send_id: SendId, headers: Headers, conn: DbConn, nt
     .await;
 
     Ok(Json(send.to_json()))
+}
+
+// bh: tests for Item Sends ("Share via link"), see bh/BH.md
+#[cfg(test)]
+mod bh_tests {
+    use super::*;
+
+    fn item_data() -> Value {
+        json!({
+            "encryptionVersion": 1,
+            "data": "2.aaaa|bbbb|cccc",
+            "metadata": { "itemId": "5b5e7a52-0c39-4a3f-9d5a-6c1f1c2b8e01", "folderName": null },
+            "response": "dropped",
+        })
+    }
+
+    #[test]
+    fn item_data_keeps_item_and_normalizes_emails() {
+        let d = bh_item_send_data(Some(item_data()), Some(" a@example.com, ,b@example.com ")).unwrap();
+        assert_eq!(d["data"], "2.aaaa|bbbb|cccc");
+        assert!(d["metadata"].is_object());
+        assert!(d.get("response").is_none());
+        assert_eq!(d[BH_ITEM_EMAILS_KEY], "a@example.com,b@example.com");
+    }
+
+    #[test]
+    fn item_data_without_emails_has_no_label() {
+        let d = bh_item_send_data(Some(item_data()), None).unwrap();
+        assert!(d.get(BH_ITEM_EMAILS_KEY).is_none());
+        let d = bh_item_send_data(Some(item_data()), Some(" , ")).unwrap();
+        assert!(d.get(BH_ITEM_EMAILS_KEY).is_none());
+    }
+
+    #[test]
+    fn item_data_requires_metadata() {
+        assert!(bh_item_send_data(Some(json!({ "data": "2.x" })), None).is_err());
+        assert!(bh_item_send_data(None, None).is_err());
+    }
+
+    #[test]
+    fn item_send_json_reports_emails_and_auth_type() {
+        let stored = bh_item_send_data(Some(item_data()), Some("a@example.com")).unwrap();
+        let send = Send::new(
+            SendType::Item as i32,
+            "2.name".into(),
+            serde_json::to_string(&stored).unwrap(),
+            "2.key".into(),
+            Utc::now().naive_utc(),
+        );
+        let j = send.to_json();
+        assert_eq!(j["type"], 2);
+        assert_eq!(j["emails"], "a@example.com");
+        assert_eq!(j["authType"], 0);
+        assert_eq!(j["data"]["data"], "2.aaaa|bbbb|cccc");
+        assert!(j["data"].get(BH_ITEM_EMAILS_KEY).is_none());
+        assert!(j["text"].is_null() && j["file"].is_null());
+
+        let plain = Send::new(
+            SendType::Item as i32,
+            "2.n".into(),
+            serde_json::to_string(&item_data()).unwrap(),
+            "2.k".into(),
+            Utc::now().naive_utc(),
+        );
+        assert_eq!(plain.to_json()["authType"], 2);
+        assert!(plain.to_json()["emails"].is_null());
+    }
 }

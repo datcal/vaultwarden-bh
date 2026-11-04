@@ -1,0 +1,114 @@
+# bh: checks and the Docker image (bh/BH.md). A pull request into bh is checked and its image is
+# built but not pushed. A push to bh (a merged pull request) builds the image again, pushes it to
+# GHCR as <upstream>-bh.<run> and latest, and creates the GitHub release of that name. Upstream's
+# own workflows are turned off here: this repository has none of their secrets.
+name: bh-build
+
+on:
+  pull_request:
+    branches: [bh]
+  push:
+    branches: [bh]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bh-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream-workflows:
+    name: Turn off upstream workflows
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$GH_REPO/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.state == "active") | select(.path | startswith(".github/workflows/bh-") | not) | .id' |
+            while read -r id; do
+              gh api -X PUT "repos/$GH_REPO/actions/workflows/$id/disable" && echo "turned off workflow $id"
+            done
+
+  checks:
+    name: Format, clippy, tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/bh' }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --features sqlite -- -D warnings
+      - run: cargo test --features sqlite
+
+  image:
+    name: Docker image
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Version
+        id: v
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          upstream=$(tr -d '[:space:]' < bh/UPSTREAM)
+          echo "upstream=$upstream" >>"$GITHUB_OUTPUT"
+          echo "version=$upstream-bh.$GITHUB_RUN_NUMBER" >>"$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${OWNER,,}/vaultwarden-bh" >>"$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build (and push on bh)
+        env:
+          IMAGE: ${{ steps.v.outputs.image }}
+          VERSION: ${{ steps.v.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          args=(
+            --file docker/Dockerfile.debian
+            --platform linux/amd64
+            --build-arg "VW_VERSION=$VERSION"
+            --label "org.opencontainers.image.source=$REPO_URL"
+            --label "org.opencontainers.image.version=$VERSION"
+            --cache-from "type=registry,ref=$IMAGE:buildcache"
+          )
+          if [ "$EVENT" != pull_request ] && [ "$REF" = refs/heads/bh ]; then
+            args+=(--cache-to "type=registry,ref=$IMAGE:buildcache,mode=max" --push -t "$IMAGE:$VERSION" -t "$IMAGE:latest")
+          fi
+          docker buildx build "${args[@]}" .
+      - name: Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/bh'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          IMAGE: ${{ steps.v.outputs.image }}
+          VERSION: ${{ steps.v.outputs.version }}
+          UPSTREAM: ${{ steps.v.outputs.upstream }}
+        run: |
+          gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --notes \
+            "Vaultwarden $UPSTREAM with \"Share via link\" (bh/BH.md).
+
+          Image: \`$IMAGE:$VERSION\` (also \`latest\`), linux/amd64.
+          Upstream release notes: https://github.com/dani-garcia/vaultwarden/releases/tag/$UPSTREAM"

@@ -220,6 +220,8 @@ fn config() -> Json<Value> {
         &FeatureFlagFilter::ValidOnly,
     );
     feature_states.insert("pm-19148-innovation-archive".to_owned(), true);
+    // bh: "Share via link" on vault items (Item Sends). Always on: this fork exists for it.
+    feature_states.insert("pm-34203-temporary-item-sharing".to_owned(), true);
 
     Json(json!({
         // Note: The clients use this version to handle backwards compatibility concerns

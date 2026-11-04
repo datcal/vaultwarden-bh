@@ -1514,6 +1514,8 @@ pub const SUPPORTED_FEATURE_FLAGS: &[&str] = &[
     "pm-30529-webauthn-related-origins",
     // Vault Team
     "pm-32009-new-item-types",
+    // Tools Team (bh: always on in api/core/mod.rs; listed so setting it in the env is not an error)
+    "pm-34203-temporary-item-sharing",
 ];
 
 #[derive(Clone, Copy, Serialize)]
