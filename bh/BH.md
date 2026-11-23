@@ -40,7 +40,7 @@ Keep it this small. Every change is marked with a `bh` comment.
 |---|---|
 | `src/db/models/send.rs` | `SendType::Item = 2`; `BH_ITEM_EMAILS_KEY`; `to_json` returns `data` for Item Sends, `emails`, and `authType` Email when emails are stored; `to_json_access` returns `data` and never the emails. |
 | `src/db/models/mod.rs` | Re-exports `BH_ITEM_EMAILS_KEY`. |
-| `src/api/core/sends.rs` | `SendData.data`; `bh_item_send_data` (needs `metadata`, stores the emails label); Item branch in `create_send` and `update_send_from_data`; `emails` refused only for non-Item Sends; `post_access` counts Item opens (one-time links close); `bh_tests`. |
+| `src/api/core/sends.rs` | `SendData.data`; `bh_item_send_data` (needs `metadata`, stores the emails label); Item branch in `create_send` and `update_send_from_data`; `emails` refused only for non-Item Sends; `post_access` counts Item opens (one-time links close); `/sends/{id}/remove-auth` as an alias of `remove-password`; `bh_tests`. |
 | `src/api/core/mod.rs` | `/api/config` serves `pm-34203-temporary-item-sharing` and `pm-30110-sdk-sends-api` as `true`. |
 | `src/config.rs` | Both flags are in `SUPPORTED_FEATURE_FLAGS`. |
 | `.github/workflows/*` | Upstream's workflows are deleted: this repository has none of their secrets, and they must not run here. Only `bh-*.yml` stays. |
@@ -108,7 +108,7 @@ A scheduled agent runs this. A person can too.
    - `bitwarden/sdk-internal` `main`: the Send endpoints in
      `crates/bitwarden-api-api/src/apis/sends_api.rs`. Every path the SDK calls must exist in
      `src/api/core/sends.rs` (today: `/sends`, `/sends/{id}`, `/sends/file/v2`,
-     `/sends/{id}/file/{fileId}`, `/sends/{id}/remove-password`, `/sends/access`,
+     `/sends/{id}/file/{fileId}`, `/sends/{id}/remove-password`, `/sends/{id}/remove-auth`, `/sends/access`,
      `/sends/access/file/{fileId}`).
 
    If a field, the flag name or the access flow changed, fix it (in the open sync pull request, or a
