@@ -51,6 +51,7 @@ pub fn routes() -> Vec<rocket::Route> {
         put_send,
         delete_send,
         put_remove_password,
+        put_remove_auth, // bh
         download_send,
         post_send_file_v2,
         post_send_file_v2_data
@@ -591,6 +592,8 @@ async fn delete_send(send_id: SendId, headers: Headers, conn: DbConn, nt: Notify
     Ok(())
 }
 
+// bh: newer Bitwarden clients and the SDK call `remove-auth` instead of `remove-password`.
+// Here only passwords exist besides Item emails (a label), so both do the same.
 #[put("/sends/<send_id>/remove-password")]
 async fn put_remove_password(send_id: SendId, headers: Headers, conn: DbConn, nt: Notify<'_>) -> JsonResult {
     enforce_disable_send_policy(&headers, &conn).await?;
@@ -611,6 +614,11 @@ async fn put_remove_password(send_id: SendId, headers: Headers, conn: DbConn, nt
     .await;
 
     Ok(Json(send.to_json()))
+}
+
+#[put("/sends/<send_id>/remove-auth")]
+async fn put_remove_auth(send_id: SendId, headers: Headers, conn: DbConn, nt: Notify<'_>) -> JsonResult {
+    put_remove_password(send_id, headers, conn, nt).await
 }
 
 // bh: tests for Item Sends ("Share via link"), see bh/BH.md
